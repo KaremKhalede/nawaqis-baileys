@@ -1,7 +1,3 @@
-/**
- * Nawaqis Baileys Microservice — WhatsApp QR Connection
- */
-
 import express from "express";
 import pino from "pino";
 import { Boom } from "@hapi/boom";
@@ -10,8 +6,11 @@ import {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } from "baileys";
 import QRCode from "qrcode";
+import fs from "fs";
+import path from "path";
 
 const log = pino({ level: "info" });
 const app = express();
@@ -19,79 +18,77 @@ app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 3001;
 const BACKEND_URL = process.env.BACKEND_URL || "https://nawaqis-backend.onrender.com";
-const WEBHOOK_SECRET = process.env.BAILEYS_WEBHOOK_SECRET || "nawaqis_baileys_dev_secret";
+const WEBHOOK_SECRET = process.env.BAILEYS_WEBHOOK_SECRET || "nawaqis_dev";
 const SESSIONS_DIR = process.env.SESSIONS_DIR || "./sessions";
 
 const sessions = new Map();
 
+// Ensure sessions dir exists
+if (!fs.existsSync(SESSIONS_DIR)) {
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+}
+
 async function startSession(storeId) {
-  // إذا الجلسة موجودة ومتصلة، نرجع فوراً
   if (sessions.has(storeId)) {
     const existing = sessions.get(storeId);
-    if (existing.connected) {
-      return { status: "connected", qr: null };
-    }
-    if (existing.qr) {
-      return { status: "qr_ready", qr: existing.qr };
-    }
-    // الجلسة موجودة بس ما تولد QR بعد — ننتظر
+    if (existing.connected) return { status: "connected", qr: null };
+    if (existing.qr) return { status: "qr_ready", qr: existing.qr };
   }
 
-  log.info(`Starting session for store: ${storeId}`);
+  const sessionPath = path.join(SESSIONS_DIR, storeId);
+
+  // Clear old session if exists (force fresh QR)
+  if (fs.existsSync(sessionPath)) {
+    log.info(`Clearing old session for ${storeId}`);
+    fs.rmSync(sessionPath, { recursive: true, force: true });
+  }
 
   const { version } = await fetchLatestBaileysVersion();
-  log.info(`Baileys version: ${version}`);
+  log.info(`Baileys ${version} starting for ${storeId}`);
 
-  const { state, saveCreds } = await useMultiFileAuthState(`${SESSIONS_DIR}/${storeId}`);
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
   const sock = makeWASocket({
     version,
-    auth: state,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
+    },
     printQRInTerminal: false,
     logger: pino({ level: "warn" }),
     browser: ["Nawaqis", "Chrome", "1.0.0"],
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     markOnlineOnConnect: false,
+    syncFullHistory: false,
   });
 
-  const sessionData = {
-    sock,
-    qr: null,
-    connected: false,
-    reconnectTimeout: null,
-  };
-
+  const sessionData = { sock, qr: null, connected: false, reconnectTimeout: null };
   sessions.set(storeId, sessionData);
 
-  // QR handler
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
+    log.info({ storeId, connection, hasQR: !!qr }, "connection update");
 
     if (qr) {
-      log.info(`QR received for store: ${storeId}`);
       const qrDataUrl = await QRCode.toDataURL(qr, { width: 256 });
       sessionData.qr = qrDataUrl;
+      log.info(`QR generated for ${storeId}`);
     }
 
     if (connection === "open") {
       sessionData.connected = true;
       sessionData.qr = null;
-      log.info(`WhatsApp connected for store: ${storeId}`);
+      log.info(`Connected: ${storeId}`);
     }
 
     if (connection === "close") {
       sessionData.connected = false;
       const code = lastDisconnect?.error?.output?.statusCode;
-      log.info(`Connection closed: ${code}`);
-
+      log.warn({ storeId, code }, "closed");
       if (code !== DisconnectReason.loggedOut) {
-        log.info(`Reconnecting store: ${storeId}`);
-        sessionData.reconnectTimeout = setTimeout(() => {
-          startSession(storeId);
-        }, 5000);
+        sessionData.reconnectTimeout = setTimeout(() => startSession(storeId), 5000);
       } else {
-        log.info(`Logged out: ${storeId}`);
         sessions.delete(storeId);
       }
     }
@@ -99,74 +96,51 @@ async function startSession(storeId) {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // Incoming messages
   sock.ev.on("messages.upsert", async (m) => {
     try {
       const msg = m.messages[0];
       if (!msg.key.fromMe && m.type === "notify") {
         const from = msg.key.remoteJid;
-        const messageText =
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          msg.message?.imageMessage?.caption ||
-          msg.message?.videoMessage?.caption ||
-          "";
-
-        if (messageText || msg.message?.imageMessage || msg.message?.videoMessage) {
+        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+        if (text) {
           await fetch(`${BACKEND_URL}/api/v1/webhooks/baileys/inbound`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Baileys-Secret": WEBHOOK_SECRET,
-            },
+            headers: { "Content-Type": "application/json", "X-Baileys-Secret": WEBHOOK_SECRET },
             body: JSON.stringify({
               store_id: storeId,
               from: from?.replace("@s.whatsapp.net", ""),
-              message: messageText,
-              type: msg.message?.imageMessage ? "image" : msg.message?.videoMessage ? "video" : "text",
+              message: text,
+              type: "text",
               message_id: msg.key.id,
               timestamp: msg.messageTimestamp,
             }),
           });
-          log.info(`Inbound from ${from} for ${storeId}`);
         }
       }
-    } catch (err) {
-      log.error(`Inbound error: ${err}`);
-    }
+    } catch (e) { log.error(e); }
   });
 
-  // Wait for QR — 60 ثانية
+  // Wait 60s for QR
   await new Promise((resolve) => {
     let done = false;
-    const checkQR = setInterval(() => {
+    const i = setInterval(() => {
       if (done) return;
       if (sessionData.qr || sessionData.connected) {
         done = true;
-        clearInterval(checkQR);
+        clearInterval(i);
         resolve();
       }
     }, 500);
     setTimeout(() => {
-      if (!done) {
-        done = true;
-        clearInterval(checkQR);
-        log.warn(`QR timeout for ${storeId} after 60s`);
-        resolve();
-      }
+      if (!done) { done = true; clearInterval(i); resolve(); }
     }, 60000);
   });
 
-  if (sessionData.qr) {
-    return { status: "qr_ready", qr: sessionData.qr };
-  } else if (sessionData.connected) {
-    return { status: "connected", qr: null };
-  } else {
-    return { status: "timeout", qr: null, error: "QR not generated in 60s — check if WhatsApp is blocking" };
-  }
+  if (sessionData.qr) return { status: "qr_ready", qr: sessionData.qr };
+  if (sessionData.connected) return { status: "connected", qr: null };
+  return { status: "timeout", qr: null, error: "WhatsApp did not send QR in 60s. May be blocked or rate-limited." };
 }
 
-// Routes
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -177,73 +151,60 @@ app.get("/health", (req, res) => {
 
 app.post("/session/:storeId/start", async (req, res) => {
   try {
-    const result = await startSession(req.params.storeId);
-    res.json(result);
+    res.json(await startSession(req.params.storeId));
   } catch (err) {
-    log.error(`Start failed: ${err}`);
+    log.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
 app.get("/session/:storeId/qr", (req, res) => {
-  const session = sessions.get(req.params.storeId);
-  if (!session) return res.status(404).json({ error: "Session not found" });
-  if (session.connected) return res.json({ status: "connected", qr: null });
-  if (session.qr) return res.json({ status: "qr_ready", qr: session.qr });
+  const s = sessions.get(req.params.storeId);
+  if (!s) return res.status(404).json({ error: "Not found" });
+  if (s.connected) return res.json({ status: "connected", qr: null });
+  if (s.qr) return res.json({ status: "qr_ready", qr: s.qr });
   res.json({ status: "waiting", qr: null });
 });
 
 app.get("/session/:storeId/status", (req, res) => {
-  const session = sessions.get(req.params.storeId);
-  if (!session) return res.json({ connected: false, status: "not_started" });
-  res.json({
-    connected: session.connected,
-    status: session.connected ? "connected" : session.qr ? "qr_ready" : "connecting",
-  });
+  const s = sessions.get(req.params.storeId);
+  if (!s) return res.json({ connected: false, status: "not_started" });
+  res.json({ connected: s.connected, status: s.connected ? "connected" : s.qr ? "qr_ready" : "connecting" });
 });
 
 app.post("/session/:storeId/send", async (req, res) => {
   const { to, message } = req.body;
-  const session = sessions.get(req.params.storeId);
-  if (!session?.connected) return res.status(503).json({ error: "Not connected" });
+  const s = sessions.get(req.params.storeId);
+  if (!s?.connected) return res.status(503).json({ error: "Not connected" });
   try {
-    const jid = to.includes("@s.whatsapp.net") ? to : `${to}@s.whatsapp.net`;
-    const result = await session.sock.sendMessage(jid, { text: message });
-    res.json({ success: true, message_id: result?.key?.id });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+    const r = await s.sock.sendMessage(jid, { text: message });
+    res.json({ success: true, message_id: r?.key?.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/session/:storeId/send-media", async (req, res) => {
   const { to, mediaUrl, caption, type } = req.body;
-  const session = sessions.get(req.params.storeId);
-  if (!session?.connected) return res.status(503).json({ error: "Not connected" });
+  const s = sessions.get(req.params.storeId);
+  if (!s?.connected) return res.status(503).json({ error: "Not connected" });
   try {
-    const jid = to.includes("@s.whatsapp.net") ? to : `${to}@s.whatsapp.net`;
-    const message = type === "image"
-      ? { image: { url: mediaUrl }, caption: caption || "" }
-      : { document: { url: mediaUrl }, caption: caption || "" };
-    const result = await session.sock.sendMessage(jid, message);
-    res.json({ success: true, message_id: result?.key?.id });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const jid = to.includes("@") ? to : `${to}@s.whatsapp.net`;
+    const msg = type === "image" ? { image: { url: mediaUrl }, caption } : { document: { url: mediaUrl }, caption };
+    const r = await s.sock.sendMessage(jid, msg);
+    res.json({ success: true, message_id: r?.key?.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/session/:storeId", async (req, res) => {
-  const session = sessions.get(req.params.storeId);
-  if (!session) return res.json({ success: true });
-  try {
-    if (session.reconnectTimeout) clearTimeout(session.reconnectTimeout);
-    if (session.sock) await session.sock.logout();
-    sessions.delete(req.params.storeId);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const s = sessions.get(req.params.storeId);
+  if (!s) return res.json({ success: true });
+  if (s.reconnectTimeout) clearTimeout(s.reconnectTimeout);
+  try { if (s.sock) await s.sock.logout(); } catch {}
+  sessions.delete(req.params.storeId);
+  // Also delete session files
+  const p = path.join(SESSIONS_DIR, req.params.storeId);
+  if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+  res.json({ success: true });
 });
 
-app.listen(PORT, () => {
-  log.info(`Nawaqis Baileys running on port ${PORT}`);
-});
+app.listen(PORT, () => log.info(`Baileys on :${PORT}`));
