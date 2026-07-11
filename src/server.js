@@ -54,12 +54,13 @@ async function startSession(storeId) {
       keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
     },
     printQRInTerminal: false,
-    logger: pino({ level: "warn" }),
+    logger: pino({ level: "debug" }),
     browser: ["Nawaqis", "Chrome", "1.0.0"],
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000,
+    connectTimeoutMs: 120000,
+    defaultQueryTimeoutMs: 120000,
     markOnlineOnConnect: false,
     syncFullHistory: false,
+    fetchAgent: undefined,
   });
 
   const sessionData = { sock, qr: null, connected: false, reconnectTimeout: null };
@@ -119,7 +120,7 @@ async function startSession(storeId) {
     } catch (e) { log.error(e); }
   });
 
-  // Wait 60s for QR
+  // Wait 90s for QR (extended for Render free tier)
   await new Promise((resolve) => {
     let done = false;
     const i = setInterval(() => {
@@ -132,12 +133,12 @@ async function startSession(storeId) {
     }, 500);
     setTimeout(() => {
       if (!done) { done = true; clearInterval(i); resolve(); }
-    }, 60000);
+    }, 90000);
   });
 
   if (sessionData.qr) return { status: "qr_ready", qr: sessionData.qr };
   if (sessionData.connected) return { status: "connected", qr: null };
-  return { status: "timeout", qr: null, error: "WhatsApp did not send QR in 60s. May be blocked or rate-limited." };
+  return { status: "timeout", qr: null, error: "WhatsApp did not send QR in 90s. Check Render logs." };
 }
 
 app.get("/health", (req, res) => {
