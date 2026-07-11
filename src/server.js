@@ -159,7 +159,7 @@ async function startSession(storeId) {
     }
   });
 
-  // Wait for QR
+  // Wait for QR — Baileys may take up to 30s on first connection
   await new Promise((resolve) => {
     const checkQR = setInterval(() => {
       if (sessionData.qr || sessionData.connected) {
@@ -167,11 +167,11 @@ async function startSession(storeId) {
         resolve();
       }
     }, 500);
-    // Timeout after 15 seconds
+    // Timeout after 30 seconds (increased from 15)
     setTimeout(() => {
       clearInterval(checkQR);
       resolve();
-    }, 15000);
+    }, 30000);
   });
 
   if (sessionData.qr) {
