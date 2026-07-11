@@ -1,13 +1,12 @@
 import express from "express";
 import pino from "pino";
-import { Boom } from "@hapi/boom";
 import {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-} from "baileys";
+} from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import fs from "fs";
 import path from "path";
