@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: nawaqis-baileys
+    env: docker
+    region: singapore
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BACKEND_URL
+        value: https://nawaqis-backend.onrender.com
+      - key: BAILEYS_WEBHOOK_SECRET
+        sync: false  # set manually — generate with: openssl rand -hex 32
+      - key: SESSIONS_DIR
+        value: ./sessions
+      - key: NODE_VERSION
+        value: 18.20.0
