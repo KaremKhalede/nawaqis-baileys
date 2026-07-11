@@ -4,7 +4,6 @@ import {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
@@ -42,8 +41,9 @@ async function startSession(storeId) {
     fs.rmSync(sessionPath, { recursive: true, force: true });
   }
 
-  const { version } = await fetchLatestBaileysVersion();
-  log.info(`Baileys ${version} starting for ${storeId}`);
+  // لا نستخدم fetchLatestBaileysVersion — نستخدم إصدار ثابت معروف
+  const version = [2, 3000, 1015900966];
+  log.info(`Baileys ${version.join('.')} starting for ${storeId}`);
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
@@ -60,7 +60,6 @@ async function startSession(storeId) {
     defaultQueryTimeoutMs: 120000,
     markOnlineOnConnect: false,
     syncFullHistory: false,
-    fetchAgent: undefined,
   });
 
   const sessionData = { sock, qr: null, connected: false, reconnectTimeout: null };
