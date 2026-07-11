@@ -2,10 +2,13 @@ FROM node:18-alpine
 
 WORKDIR /app
 
+# Install git (needed by baileys npm package)
+RUN apk add --no-cache git
+
 # Copy package files
 COPY package.json ./
 
-# Install dependencies (no package-lock.json yet → use npm install)
+# Install dependencies
 RUN npm install --omit=dev
 
 # Copy source
