@@ -10,7 +10,7 @@ import {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-} from "@whiskeysockets/baileys";
+} from "baileys";
 import QRCode from "qrcode";
 
 const log = pino({ level: "info" });
