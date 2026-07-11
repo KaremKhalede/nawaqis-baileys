@@ -67,24 +67,30 @@ async function startSession(storeId) {
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
-    log.info({ storeId, connection, hasQR: !!qr }, "connection update");
+    // سجل كل تفاصيل التحديث للتشخيص
+    log.info({ storeId, connection, hasQR: !!qr, update: JSON.stringify(update).slice(0, 500) }, "connection.update");
 
     if (qr) {
       const qrDataUrl = await QRCode.toDataURL(qr, { width: 256 });
       sessionData.qr = qrDataUrl;
-      log.info(`QR generated for ${storeId}`);
+      log.info(`✅ QR generated for ${storeId}`);
     }
 
     if (connection === "open") {
       sessionData.connected = true;
       sessionData.qr = null;
-      log.info(`Connected: ${storeId}`);
+      log.info(`✅ WhatsApp connected: ${storeId}`);
+    }
+
+    if (connection === "connecting") {
+      log.info(`🔄 Connecting to WhatsApp for ${storeId}...`);
     }
 
     if (connection === "close") {
       sessionData.connected = false;
       const code = lastDisconnect?.error?.output?.statusCode;
-      log.warn({ storeId, code }, "closed");
+      const errorMsg = lastDisconnect?.error?.message || "unknown";
+      log.error({ storeId, code, errorMsg, error: JSON.stringify(lastDisconnect?.error || {}).slice(0, 300) }, "❌ Connection closed");
       if (code !== DisconnectReason.loggedOut) {
         sessionData.reconnectTimeout = setTimeout(() => startSession(storeId), 5000);
       } else {
